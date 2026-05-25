@@ -1,339 +1,222 @@
 # Battery SOC Estimation
 
-基于深度学习的电池荷电状态（State of Charge, SOC）估计框架。支持多种时序编码器（LSTM / GRU / CNN / TCN / FCN）、插拔式池化层和回归头，通过 YAML 配置驱动实验。
+基于深度学习的电池 **SOC（State of Charge，荷电状态）** 估计项目。从自有电池循环仪导出的 Excel 工作簿出发，完成数据预处理、模型训练、评估全流程。
 
-## 工程架构
-
-```
-configs/                  ← YAML 配置文件（继承合并）
-  base/default.yaml       基础配置
-  experiments/*.yaml      实验特定配置
-scripts/
-  prepare_data.py         离线数据转换（Excel → Canonical CSV）
-  train.py                训练入口
-  eval.py                 评估入口
-src/
-  data/                   数据处理层
-    converters/            离线数据转换器（自有设备 Excel）
-    dataset.py             DataLoader 构建 + 数据集划分
-    window.py              滑动窗口生成
-    preprocess.py          Z-score 标准化器
-    schema.py              规范化数据契约校验
-    io.py                  CSV 加载 + manifest 读取
-  models/                 模型层
-    encoders/              LSTM / GRU / FCN / CNN / TCN 编码器
-    pooling/               Last / Mean / Max / Attention 池化
-    head.py                RegressionHead（线性或隐藏层+ReLU）
-    soc_model.py           Encoder → Pooling → Head 组合模型
-    registry.py            组件注册表（编码器/池化/头部/模型）
-  training/               训练层
-    trainer.py             Trainer（早停 + 检查点）
-    losses.py              MSE / MAE / Smooth L1 注册表
-    optimizers.py          Adam / AdamW / SGD 注册表
-    checkpoint.py          模型保存与加载
-  evaluation/             评估层
-    metrics.py             MSE / MAE / RMSE / Max Error / R²
-    plots.py               训练曲线 / 预测对比 / 逐序列 SOC 图
-  utils/                  工具层
-    config.py              YAML 加载 + extends 继承 + 深度合并
-    plugins.py             插件动态导入
-    seed.py                全局随机种子
-    logger.py              统一日志
-  experiment.py            实验管理（设备选择、评估保存）
-tests/                    单元测试
-outputs/experiments/      实验结果输出
-```
-
-### 架构设计原则
-
-**分层解耦**：数据处理、模型、训练、评估四层独立，通过配置字典（`config: dict`）在 `scripts/train.py` 中串联。
-
-**注册表模式**：模型组件（编码器、池化、头部、损失、优化器）全部通过注册表 + 字符串名称构建。添加新组件只需 `register_*` 并在配置中指定名称，无需修改训练流水线。
-
-```python
-# 示例：注册并使用自定义编码器
-from src.models import register_encoder
-register_encoder("transformer", build_transformer)
-# 然后在 YAML 中写 model.name: transformer 即可
-```
-
-**配置驱动**：所有超参数通过 YAML 控制，支持 `extends` 链式继承和 `deep_merge`。基础配置定义默认值，实验配置只覆写差异部分。
-
-**插件扩展**：通过 `config.plugins` 声明外部模块路径，利用 Python 导入副作用自动注册自定义组件，无需侵入现有代码。
-
-**归一化防泄露**：`Standardizer` 仅在训练集上拟合（`fit(train_values)`），然后整体变换，避免验证/测试集信息泄露。
-
-**划分防泄露**：默认按 `sequence_id` 维度依据 `data.split` 比例随机划分，确保同一电池循环的所有窗口落在同一集合中；也可通过 `data.split_column` 使用数据中已经定义好的划分。
-
-## 数据格式
-
-### 规范化 CSV 格式（Canonical CSV）
-
-所有模型训练共用同一数据契约，包含以下核心列：
-
-| 列名 | 类型 | 说明 |
-|------|------|------|
-| `sequence_id` | str | 序列标识（如电池循环 ID） |
-| `time` | float | 时间戳（秒），每个序列内单调递增 |
-| `soc` | float | 荷电状态目标值，范围 [0, 1] |
-| 特征列（可配置） | float | 如 voltage、current、temperature 等 |
-
-特征列由配置中的 `data.feature_columns` 指定，可自由增减，不修改任何流水线代码。
-
-### 离线数据源
-
-目前支持将**自有电池循环仪导出的 Excel 工作簿**转换为 Canonical CSV：
-
-| 转换器 | 输入 | SOC 计算方法 |
-|--------|------|-------------|
-| `cycler_workbook` | 循环仪 Excel（含 record + auxTemp 工作表） | 安时积分 + 充/放电容量比 |
-
-转换逻辑位于 `src/data/converters/cycler_workbook.py`，包括：
-1. 1 Hz 去重采样
-2. 电流符号归一化（充电为正、放电为负）
-3. 安时积分（Ah 累计）
-4. 温度映射（从 auxTemp 工作表中匹配）
-5. 基于充/放电容量的 SOC 计算
-6. 列名映射、manifest 与原始文件指纹生成
-
-## 完整训练流程
-
-### 1. 配置加载
+## 项目结构
 
 ```
-configs/base/default.yaml  ←  extends 继承链解析
-        ↓ deep_merge
-configs/experiments/xxx.yaml
-        ↓ load_config()
-完整配置字典
+myproject/
+├── configs/
+│   ├── base/
+│   │   └── default.yaml          # 基础配置（所有实验共享的默认值）
+│   └── experiments/
+│       ├── temp.yaml              # 实验配置示例（4 特征 LSTM）
+│       └── test.yaml              # 实验配置示例（5 特征 LSTM）
+├── data/
+│   ├── raw/                       # 原始 Excel 工作簿 (*.xlsx)
+│   └── processed/                 # 规范化 CSV（自动生成）
+├── scripts/
+│   ├── prepare_data.py            # 离线数据转换：Excel → 规范化 CSV
+│   ├── train.py                   # 训练入口
+│   └── eval.py                    # 评估入口
+├── src/
+│   ├── data/                      # 数据流水线
+│   │   ├── converters/            # 自有设备 Excel 转换器
+│   │   ├── dataset.py             # SOCDataset、DataBundle、数据加载器构建
+│   │   ├── io.py                  # CSV 与 manifest 文件读写
+│   │   ├── preprocess.py          # Z-score 标准化器
+│   │   ├── schema.py              # 规范化数据契约与校验
+│   │   └── window.py              # 滑动窗口构建
+│   ├── models/                    # 模型组件
+│   │   ├── encoders/              # 编码器：LSTM、GRU、FCN、CNN、TCN
+│   │   ├── pooling/               # 池化：last、mean、max、attention
+│   │   ├── head.py                # 回归头
+│   │   ├── soc_model.py           # Encoder → Pooling → Head 组装
+│   │   └── registry.py            # 模型组件注册表与构建器
+│   ├── training/                  # 训练基础设施
+│   │   ├── trainer.py             # Trainer（早停训练循环）+ predict
+│   │   ├── checkpoint.py          # 检查点保存/加载
+│   │   ├── losses.py              # 损失函数注册表（MSE/MAE/SmoothL1）
+│   │   └── optimizers.py          # 优化器注册表（Adam/AdamW/SGD）
+│   ├── evaluation/                # 评估
+│   │   ├── metrics.py             # 回归指标（MSE/MAE/RMSE/MaxError/R²）
+│   │   └── plots.py               # 可视化（训练曲线、预测对比图）
+│   ├── experiment.py              # 实验管理（设备选择、评估保存）
+│   └── utils/                     # 工具
+│       ├── config.py              # YAML 配置加载与合并（支持 extends 继承）
+│       ├── logger.py              # 统一日志记录器
+│       ├── plugins.py             # 插件动态加载
+│       └── seed.py                # 全局随机种子
+├── tests/                         # 测试
+├── outputs/                       # 训练产出（自动生成）
+│   └── experiments/
+│       └── <experiment_name>/
+│           ├── checkpoints/
+│           ├── plots/
+│           ├── predictions.csv
+│           ├── metrics.json
+│           ├── summary.json
+│           └── history.json
+└── requirements.txt
 ```
 
-`load_config()` 递归解析 `extends` 链，然后将实验配置深度合并到基础配置上，生成最终运行配置。
+## 架构设计
 
-### 2. 随机种子与插件
-
-```python
-seed_everything(config["seed"])      # Python / NumPy / PyTorch
-load_plugins(config)                  # 导入外部插件模块
-```
-
-### 3. 数据准备（离线转换）
-
-若配置中包含 `data.raw_path`，训练脚本会自动判断是否需要调用 `prepare_cycler_workbooks()` 将原始 Excel 转为规范化 CSV。训练前会根据 `manifest` 检查 CSV 的序列数、总行数和列结构，并检查原始文件集合及内容指纹；只有产物完整且数据源未变化时才直接复用。旧版完整产物首次复用时会自动补写原始文件指纹，不重新转换 CSV。不完整或过期的产物会自动重新处理，重建时会清除该数据集目录中已失效的旧序列 CSV。相同输入在单次多实验命令中只处理一次。
-
-### 4. 数据加载与预处理
+### 数据流水线
 
 ```
-load_canonical_csv(root, data_config)
-  → glob 匹配 CSV → pd.concat → validate_canonical_frame()
-    （检查必需列、数值合法性、SOC ∈ [0,1]、时间单调性）
-        ↓
-_assign_splits(frame)
-  → 默认按 sequence_id 与 data.split 比例随机划分 train/val/test
-  → 若提供 data.split_column，则使用 CSV 中已有划分
-        ↓
-Standardizer.fit(train_values)     ← 仅在训练集上拟合 Z-score
-Standardizer.transform(all_values)
-        ↓
-build_windows(subset, window_size, stride)
-  → 每个 sequence 内独立生成滑动窗口，不跨边界
-  → 窗口标签 = 窗口最后时间步的 SOC
-  → (n_windows, window_size, n_features) 特征 + (n_windows,) 目标
-        ↓
-SOCDataset(windowed) → DataLoader
-  train: shuffle=True
-  val/test: shuffle=False
-        ↓
-DataBundle(loaders, datasets, artifacts, input_dim)
+原始 Excel 工作簿               规范化 CSV                   滑动窗口                标准化特征
+┌──────────────┐   离线转换     ┌──────────────┐   窗口化     ┌──────────────┐   fit on   ┌──────────────┐
+│ .xlsx        │ ────────────→  │ sequence_id  │ ──────────→  │ (N, W, F)    │ ────────→  │ (N, W, F)    │
+│ (record +    │               │ time         │              │ 窗口特征      │  train set │ 标准化后      │
+│  auxTemp)    │               │ soc          │              │ + 目标值      │            │              │
+└──────────────┘               │ voltage ...  │              └──────────────┘            └──────────────┘
+                               └──────────────┘
 ```
 
-### 5. 模型构建
+关键设计决策：
 
-```python
-build_model(config["model"], input_dim)
-  → model.architecture.name = "encoder_pooling_head"  ← 默认架构
-    → build_encoder(config, input_dim)     # 如 LSTM(hidden=64, layers=2)
-    → build_pooling(pooling_name, dim)     # 如 LastPooling
-    → build_head(head_config, dim)         # 如 RegressionHead
-    → SOCModel(encoder, pooling, head)
-```
+- **标准化器仅对训练集拟合**，验证集和测试集使用训练集的均值和标准差做变换，避免数据泄露。
+- **窗口以序列为边界**，不会跨序列滑动。窗口标签取窗口最后一个时间步的 SOC 值。
+- **按序列划分数据集**（而非按行随机划分），确保同一充放电循环的数据不会同时出现在训练集和测试集中。
+- **原始文件指纹**（SHA256 + 文件大小）写入 manifest，后续训练若原始文件未变则跳过转换。
 
-模型前向：`(batch, seq_len, n_features) → encoder → (batch, seq_len, hidden) → pooling → (batch, hidden) → head → (batch, 1)`
+#### SOC 计算逻辑
 
-### 6. 训练循环
+从循环仪 Excel 的 record 工作表中提取每个循环的充放电数据，通过安时积分法（Coulomb Counting）计算 SOC：
 
-```python
-Trainer(model, criterion, optimizer, device, patience, min_delta)
-  → for epoch in 1..epochs:
-      _epoch(train_loader, training=True)
-        → 逐 batch 前向 → loss.backward → optimizer.step
-        → 加权平均损失 = Σ(loss × batch_size) / total_samples
-      _epoch(val_loader, training=False)
-        → 同计算，无梯度
-      if val_loss < best_val_loss - min_delta:
-        save_checkpoint(..., model_state, optimizer_state, epoch, ...)
-        best_epoch ← epoch, stale_epochs ← 0
-      else:
-        stale_epochs += 1
-        if stale_epochs ≥ patience → 早停退出
-  → TrainingResult(history, best_epoch, best_val_loss, checkpoint_path)
-```
+- 基于充/放电总容量和累积电量推导 SOC
+- 1 Hz 去重采样（每秒保留一条记录）
+- 温度从 auxTemp 工作表通过 record_id 映射
+- 衍生特征：功率（voltage × current）、CC 容量（累积充电 - 累积放电）
 
-### 7. 评估与输出
+### 模型架构
+
+采用 **Encoder → Pooling → Head** 三段式可插拔架构：
 
 ```
-load_checkpoint(best.pt) → model.load_state_dict
-        ↓
-predict(model, test_loader, device)
-  → 批量前向推理 → (actual, predicted, indices)
-        ↓
-evaluate_and_save(model, bundle, device, output_dir)
-  → predictions.csv      (sequence_id, time, actual_soc, predicted_soc, error)
-  → metrics.json         (mse, mae, rmse, max_error, r2)
-  → plots/
-      soc_prediction_curve.png   实际 vs 预测 SOC 曲线
-      pred_vs_true.png           散点图 + 对角线
-      training_curve.png         训练/验证损失曲线
-      soc_over_time_by_sequence/
-        {id}_soc_over_time.png  每个测试序列的逐时间步 SOC 图
+输入 (batch, window_size, features)
+        │
+        ▼
+┌───────────────────┐
+│     Encoder        │  时序编码，提取每步特征
+│  LSTM / GRU /      │  output: (batch, window_size, feature_dim)
+│  FCN / CNN / TCN   │
+└───────────────────┘
+        │
+        ▼
+┌───────────────────┐
+│     Pooling         │  时间维聚合
+│  last / mean /      │  output: (batch, feature_dim)
+│  max / attention    │
+└───────────────────┘
+        │
+        ▼
+┌───────────────────┐
+│      Head           │  回归映射
+│  RegressionHead     │  output: (batch, 1)
+└───────────────────┘
 ```
+
+#### 编码器说明
+
+| 编码器 | 类型 | 特点 |
+|--------|------|------|
+| LSTM | 循环网络 | 长序列依赖建模，适合时序数据 |
+| GRU | 循环网络 | 与 LSTM 类似，参数更少 |
+| FCN | 全连接 | 逐时间步独立处理，渐进减半通道（hidden_size → hidden_size/2 → ...），每层含 BatchNorm1d |
+| CNN | 一维卷积 | 沿时间轴提取局部模式，渐进减半通道，每层含 BatchNorm1d |
+| TCN | 时序卷积 | 膨胀卷积扩大感受野 |
+
+#### 池化策略说明
+
+| 池化 | 行为 |
+|------|------|
+| last | 取最后一个时间步的输出 |
+| mean | 对所有时间步取平均 |
+| max | 对所有时间步取最大值 |
+| attention | 学习每个时间步的权重，加权求和 |
+
+#### 回归头
+
+- `hidden_size` 为 null 时：单层 Linear(feature_dim, 1)
+- `hidden_size` 非 null 时：Linear → ReLU → Dropout → Linear 两层结构
+
+### 配置系统
+
+配置采用两层继承机制：
+
+```
+configs/base/default.yaml       ← 所有实验的公共默认值
+        ↑ extends
+configs/experiments/*.yaml      ← 实验特定覆盖
+```
+
+实验配置文件中的 `extends` 字段指向一个或多个基础配置，最终配置由基础配置深度合并实验覆盖得到。配置中支持通过 `plugins` 字段声明要导入的外部模块（利用注册副作用扩展组件）。
+
+### 训练流程
+
+1. **数据准备**：检查原始 Excel 是否有对应的 canonical CSV 产物，若无则自动调用 `prepare_cycler_workbooks` 转换。
+2. **数据加载**：加载所有 CSV → 按序列划分 train/val/test → 仅在训练集上拟合标准化器 → 构建滑动窗口 → 封装为 DataLoader。
+3. **模型构建**：根据 `model` 配置节构建 Encoder + Pooling + Head。
+4. **训练循环**：每个 epoch 后验证，保存最佳模型检查点。支持早停（`patience` + `min_delta`）。
+5. **评估**：加载最佳检查点 → 测试集推理 → 计算 MSE/MAE/RMSE/MaxError/R² → 生成预测曲线图。
 
 ## 快速开始
 
-### 环境
+### 环境准备
 
 ```bash
+conda create -n SOC python=3.10
+conda activate SOC
 pip install -r requirements.txt
 ```
 
-主要依赖：`torch`, `numpy`, `pandas`, `PyYAML`, `matplotlib`, `openpyxl`, `tqdm`。
+依赖项：PyTorch 2.12.0 (CUDA 12.3)、NumPy、Pandas、PyYAML、Matplotlib、openpyxl、tqdm。
 
-### 准备数据
+### 1. 准备数据
+
+将循环仪导出的 Excel 工作簿放入 `data/raw/` 目录。每个工作簿需包含：
+- `record` 工作表：含数据序号、循环号、工步类型、时间、电流、电压等列
+- `auxTemp` 工作表：含数据序号和温度列
+
+数据转换会在训练时自动完成，也可手动运行：
 
 ```bash
-# 将自有循环仪 Excel 工作簿转为规范化 CSV
 python scripts/prepare_data.py \
-  --input "data/raw/0.?C.xlsx" \
-  --output data/processed/own_cell \
-  --overwrite
+    --input "data/raw/0.1C.xlsx" "data/raw/0.2C.xlsx" \
+    --output data/processed/my_dataset
 ```
 
-### 训练
+### 2. 创建实验配置
 
-```bash
-# 单实验
-python scripts/train.py --configs configs/experiments/temp.yaml
-
-# 多实验（glob 模式）
-python scripts/train.py --configs configs/experiments/*.yaml
-
-# 指定多个配置
-python scripts/train.py --configs configs/experiments/exp1.yaml configs/experiments/exp2.yaml
-```
-
-### 评估
-
-以下命令假设已经完成 `temp.yaml` 的训练并生成最佳检查点。
-
-```bash
-# 重新评估训练时保存的原测试集
-python scripts/eval.py \
-  --checkpoint outputs/experiments/temp/checkpoints/best.pt
-
-# 使用已训练模型评估新的 Excel 数据集，不重新训练
-python scripts/eval.py \
-  --checkpoint outputs/experiments/temp/checkpoints/best.pt \
-  --raw-input "data/raw/8cycle*.xlsx" \
-  --dataset-name 8cycle
-```
-
-指定 `--raw-input` 后，脚本会先将外部 Excel 转换为 canonical CSV，再使用 checkpoint 中保存的特征列、标准化参数和模型权重，对这些序列整体评估。结果写入 `outputs/experiments/<experiment.name>/evaluation/<dataset-name>/`。
-
-### 运行测试
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-## 配置指南
-
-### 基础配置结构
+在 `configs/experiments/` 下创建 YAML 配置文件，继承基础配置并指定数据集和模型：
 
 ```yaml
-# configs/base/default.yaml
-seed: 42
-
-experiment:
-  name: default
-
-data:
-  format: canonical_csv        # 数据格式
-  split_column: null            # null 表示按 sequence_id 随机划分
-  window_size: 20              # 滑动窗口长度
-  stride: 1                    # 滑动步长
-  num_workers: 0               # DataLoader 读取进程数
-  split_seed: 24               # 随机划分种子
-  split:                       # 默认数据集划分比例
-    train: 0.8
-    val: 0.1
-    test: 0.1
-
-model:
-  name: lstm                    # 编码器: lstm/gru/fcn/tcn/cnn
-  hidden_size: 64
-  num_layers: 2
-  dropout: 0.0
-  pooling:
-    name: last                  # 池化: last/mean/max/attention
-  head:
-    hidden_size: null           # null 为直接 Linear
-    dropout: 0.0
-
-train:
-  batch_size: 64
-  epochs: 50
-  learning_rate: 0.001
-  optimizer:
-    name: adam                  # adam/adamw/sgd
-    weight_decay: 0.0
-  loss:
-    name: mse                   # mse/mae/l1/smooth_l1
-  patience: 10                  # 早停耐心值
-  min_delta: 0.0
-  device: auto                  # auto/cuda/cpu
-
-output:
-  dir: outputs/experiments
-```
-
-### 实验配置（继承覆写）
-
-```yaml
-# configs/experiments/temp.yaml
 extends:
-  - ../base/default.yaml         # 继承基础配置
+  - ../base/default.yaml
 
 experiment:
-  name: temp
+  name: my_lstm_experiment
 
 data:
-  dataset_name: own_cell_base_rates
-  raw_path: data/raw/0.?C.xlsx   # 原始 Excel → 自动转换
+  dataset_name: my_dataset           # 对应 data/processed/<name>
+  raw_path: data/raw/*.xlsx          # 原始 Excel 路径
   feature_columns:
     - voltage
     - current
     - temperature
     - power
+    - cc_capacity
 
 model:
-  name: lstm
+  name: lstm                         # 编码器：lstm / gru / fcn / cnn / tcn
   hidden_size: 64
   num_layers: 2
-  dropout: 0.0
+  dropout: 0.1
   pooling:
-    name: last
+    name: last                       # 池化：last / mean / max / attention
   head:
-    name: regression
     hidden_size: null
     dropout: 0.0
 
@@ -345,71 +228,107 @@ train:
     name: adam
     weight_decay: 0.0
   loss:
-    name: mse
+    name: mse                        # 损失函数：mse / mae / smooth_l1
   patience: 10
 ```
 
-各参数说明与可选值见 [`configs/README.md`](configs/README.md)。
+### 3. 训练
 
-## 扩展指南
+```bash
+# 训练指定实验
+python scripts/train.py --configs configs/experiments/my_experiment.yaml
 
-### 添加新编码器
+# 训练多个实验（glob 模式）
+python scripts/train.py --configs "configs/experiments/*.yaml"
+```
+
+训练产物输出到 `outputs/experiments/<experiment_name>/`，包含：
+- `checkpoints/best.pt` — 最佳模型检查点
+- `history.json` — 每轮训练/验证损失
+- `metrics.json` — 测试集评估指标
+- `predictions.csv` — 每条测试样本的预测值
+- `plots/` — 训练曲线、预测对比图、各序列 SOC 时序图
+
+### 4. 评估已有检查点
+
+```bash
+# 评估原始测试集
+python scripts/eval.py --checkpoint outputs/experiments/<name>/checkpoints/best.pt
+
+# 对外部新数据评估
+python scripts/eval.py \
+    --checkpoint outputs/experiments/<name>/checkpoints/best.pt \
+    --raw-input "data/raw/new_battery.xlsx" \
+    --dataset-name new_battery_test
+```
+
+## 配置参考
+
+### data
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `dataset_name` | str | — | 对应 `data/processed/<name>` 目录 |
+| `raw_path` | str/list | — | 原始 Excel 路径或 glob |
+| `feature_columns` | list | — | 模型输入特征列名 |
+| `window_size` | int | 20 | 滑动窗口大小 |
+| `stride` | int | 1 | 窗口滑动步长 |
+| `split.train` | float | 0.8 | 训练集比例 |
+| `split.val` | float | 0.1 | 验证集比例 |
+| `split.test` | float | 0.1 | 测试集比例 |
+| `split_column` | str | null | 使用数据中的列做划分（null 则随机划分） |
+| `split_seed` | int | 24 | 数据集划分随机种子 |
+| `num_workers` | int | 0 | DataLoader 工作进程数 |
+
+### model
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | str | lstm | 编码器：lstm / gru / fcn / cnn / tcn |
+| `hidden_size` | int | 64 | 隐藏层大小/通道数 |
+| `num_layers` | int | 2 | 层数 |
+| `dropout` | float | 0.0 | 编码器内 Dropout 比例 |
+| `kernel_size` | int | 3 | 卷积核大小（仅 CNN、TCN） |
+| `pooling.name` | str | last | 池化策略：last / mean / max / attention |
+| `head.hidden_size` | int | null | 回归头隐层大小（null 为单层） |
+| `head.dropout` | float | 0.0 | 回归头 Dropout 比例 |
+
+### train
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `batch_size` | int | 64 | 批大小 |
+| `epochs` | int | 50 | 最大训练轮数 |
+| `learning_rate` | float | 0.001 | 学习率 |
+| `optimizer.name` | str | adam | 优化器：adam / adamw / sgd |
+| `optimizer.weight_decay` | float | 0.0 | 权重衰减 |
+| `loss.name` | str | mse | 损失函数：mse / mae / smooth_l1 |
+| `patience` | int | 10 | 早停耐心值 |
+| `min_delta` | float | 0.0 | 判定改善的最小损失下降量 |
+| `device` | str | auto | 计算设备：auto / cuda / cpu |
+| `seed` | int | 42 | 全局随机种子 |
+
+## 扩展
+
+### 注册自定义组件
+
+项目使用注册表模式，可以在外部模块中注册新的编码器、池化、回归头、损失函数或优化器，然后通过配置的 `plugins` 导入：
 
 ```python
-from torch import nn
-from src.models import register_encoder
+# my_plugins.py
+from src.models.registry import register_encoder
+from src.training.losses import register_loss
 
-class MyEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_size, num_layers, dropout):
-        super().__init__()
-        self.output_dim = hidden_size
-        # ...
-
-def build_my_encoder(config, input_dim):
-    return MyEncoder(input_dim, config["hidden_size"], ...)
-
-register_encoder("my_encoder", build_my_encoder)
-# 然后在 YAML 中: model.name: my_encoder
+register_encoder("my_encoder", my_encoder_builder)
+register_loss("my_loss", my_loss_builder)
 ```
 
-### 添加新池化层
-
-```python
-from src.models import register_pooling
-
-class MyPooling(nn.Module):
-    def forward(self, encoded):
-        return encoded[:, -1, :] * 2
-
-register_pooling("my_pooling", lambda dim: MyPooling())
+```yaml
+# 配置中声明
+plugins:
+  - my_plugins
 ```
 
-### 添加新损失函数
+### 添加新特征
 
-```python
-from torch import nn
-from src.training import register_loss
-
-register_loss("huber", lambda config: nn.HuberLoss(delta=float(config.get("delta", 1.0))))
-# YAML: train.loss.name: huber
-```
-
-### 添加新数据源转换器
-
-在 `src/data/converters/` 下添加转换模块，将新数据源转换为 Canonical CSV；若希望 `train.py` 或 `eval.py` 自动处理该数据源，还需要在入口的数据准备分发逻辑中接入该转换器。当前内置自动转换流程仅处理 `cycler_workbook` Excel。
-
-## 实验结果位置
-
-每个实验的真实结果以本次运行生成的文件为准：
-
-```text
-outputs/experiments/<experiment.name>/
-  resolved_config.yaml                实际生效的完整配置
-  data_manifest.yaml                  本次使用的数据元信息
-  history.json                        训练与验证损失历史
-  summary.json                        最佳 epoch、验证损失与测试指标
-  metrics.json                        MSE / MAE / RMSE / Max Error / R²
-  predictions.csv                     每个测试窗口的真实值与预测值
-  checkpoints/best.pt                 最佳模型检查点
-  plots/                              训练与预测图
-```
+在 `feature_columns` 中添加列名即可，前提是规范化 CSV 中包含该列（若需从原始 Excel 提取，则修改 `cycler_workbook.py` 中的转换逻辑）。
