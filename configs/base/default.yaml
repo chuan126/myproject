@@ -1,0 +1,43 @@
+seed: 42
+
+experiment:
+  name: default
+
+data:
+  format: canonical_csv
+  split_column: null
+  window_size: 20
+  stride: 1
+  num_workers: 0
+  split_seed: 24
+  split:
+    train: 0.8
+    val: 0.1
+    test: 0.1
+
+model:
+  name: lstm
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.0
+  pooling:
+    name: last
+  head:
+    hidden_size: null
+    dropout: 0.0
+
+train:
+  batch_size: 64
+  epochs: 50
+  learning_rate: 0.001
+  optimizer:
+    name: adam
+    weight_decay: 0.0
+  loss:
+    name: mse
+  patience: 10
+  min_delta: 0.0
+  device: auto
+
+output:
+  dir: outputs/experiments

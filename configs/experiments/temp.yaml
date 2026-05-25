@@ -1,0 +1,37 @@
+extends:
+  - ../base/default.yaml
+
+experiment:
+  name: temp
+
+data:
+  dataset_name: own_cell_base_rates
+  raw_path: data/raw/0.?C.xlsx
+  feature_columns:
+    - voltage
+    - current
+    - temperature
+    - power
+
+model:
+  name: lstm
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.0
+  pooling:
+    name: last
+  head:
+    name: regression
+    hidden_size: null
+    dropout: 0.0
+
+train:
+  batch_size: 256
+  epochs: 120
+  learning_rate: 0.001
+  optimizer:
+    name: adam
+    weight_decay: 0.0
+  loss:
+    name: mse
+  patience: 10

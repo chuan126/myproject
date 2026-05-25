@@ -1,0 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+numpy
+pandas
+PyYAML
+matplotlib
+openpyxl
+tqdm
+torch==2.12.0+cu130
