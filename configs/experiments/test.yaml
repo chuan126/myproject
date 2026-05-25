@@ -6,7 +6,7 @@ experiment:
 
 data:
   dataset_name: own_cell_base_rates
-  raw_path: data/raw/0.?C.xlsx
+  raw_path: data/raw/*.xlsx
   feature_columns:
     - voltage
     - current
