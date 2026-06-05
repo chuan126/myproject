@@ -6,3 +6,4 @@ experiment:
 
 data:
   dataset_name: data_5s
+  raw_path: null
