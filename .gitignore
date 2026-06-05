@@ -16,3 +16,5 @@ outputs/*
 outputs/experiments/*
 !outputs/experiments/.gitkeep
 
+.codegraph/*
+

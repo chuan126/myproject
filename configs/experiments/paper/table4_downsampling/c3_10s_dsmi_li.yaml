@@ -1,0 +1,8 @@
+extends:
+  - c1_1s_dsmi_li.yaml
+
+experiment:
+  name: paper/table4_downsampling/c3_10s_dsmi_li
+
+data:
+  dataset_name: data_10s

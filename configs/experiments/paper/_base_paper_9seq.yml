@@ -1,0 +1,29 @@
+extends:
+  - ../../base/default.yaml
+
+data:
+  dataset_name: data
+  raw_path: data/raw/*.xlsx
+  split_column: split
+  split_rules:
+    test:
+      - "*2000N*"
+    remaining:
+      train: 0.67
+      val: 0.33
+  window_size: 20
+  stride: 1
+  num_workers: 0
+
+train:
+  batch_size: 64
+  epochs: 50
+  learning_rate: 0.001
+  optimizer:
+    name: adam
+    weight_decay: 0.0
+  loss:
+    name: mse
+  patience: 10
+  min_delta: 0.0
+  device: auto

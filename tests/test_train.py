@@ -1,3 +1,23 @@
+"""测试训练脚本中的数据处理预备和校验逻辑。
+
+验证以下功能：
+1. has_processed_training_data：校验规范化数据完整性
+   - 正常检测完整数据集
+   - 检测缺失的 CSV 文件
+   - 检测行数不匹配
+   - 检测损坏的 manifest
+   - 检测原始文件变更（路径不同、内容签名不同）
+2. prepare_training_data：按需触发数据准备
+   - 复用已有完整数据（不重复转换）
+   - 为旧版 manifest 补写签名
+   - 重建不完整数据集
+   - 同一训练命令中相同数据集仅处理一次
+   - 原始文件内容变更时重新处理
+3. resolve_processed_data_paths：根据 dataset_name 推演路径
+   - 正确生成规范的 data/processed/<name> 路径
+   - 拒绝包含父目录引用的 dataset_name
+"""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +30,8 @@ from src.data import raw_file_signature
 
 
 class PrepareTrainingDataTests(unittest.TestCase):
+    """测试训练数据预备流程的完整校验和触发逻辑。"""
+
     def write_processed_data(
         self,
         root: Path,
@@ -17,6 +39,18 @@ class PrepareTrainingDataTests(unittest.TestCase):
         raw_files: list[str] | None = None,
         raw_file_signatures: list[dict] | None = None,
     ) -> None:
+        """辅助方法：在临时目录中构造一个完整的规范化数据集目录结构。
+
+        创建 data/processed/own_cell/ 目录，包含：
+        - sequences/ 子目录中的 CSV 文件
+        - manifest.yaml 元信息文件
+
+        Args:
+            root: 临时根目录。
+            rows_by_file: 文件名到 (time, sequence_id) 行列表的映射。
+            raw_files: 可选的原始文件路径列表，写入 manifest。
+            raw_file_signatures: 可选的原始文件签名列表，写入 manifest。
+        """
         output_dir = root / "data" / "processed" / "own_cell"
         sequence_dir = output_dir / "sequences"
         sequence_dir.mkdir(parents=True)
@@ -42,6 +76,10 @@ class PrepareTrainingDataTests(unittest.TestCase):
             (sequence_dir / name).write_text(content, encoding="utf-8")
 
     def test_detects_existing_processed_dataset(self) -> None:
+        """验证 has_processed_training_data 能正确识别完整的数据集。
+
+        构造一个与 manifest 完全一致的规范化数据集，应返回 True。
+        """
         data_config = {
             "path": "data/processed/own_cell/sequences/**/*.csv",
             "manifest": "data/processed/own_cell/manifest.yaml",
@@ -53,6 +91,11 @@ class PrepareTrainingDataTests(unittest.TestCase):
             self.assertTrue(has_processed_training_data(data_config))
 
     def test_rejects_processed_dataset_with_missing_sequence_csv(self) -> None:
+        """验证 manifest 记录的 CSV 文件缺失时返回 False。
+
+        manifest 声明了 2 个序列，但删除了其中一个 CSV 文件，
+        应检测到文件数不匹配。
+        """
         data_config = {
             "path": "data/processed/own_cell/sequences/**/*.csv",
             "manifest": "data/processed/own_cell/manifest.yaml",
@@ -71,6 +114,10 @@ class PrepareTrainingDataTests(unittest.TestCase):
             self.assertFalse(has_processed_training_data(data_config))
 
     def test_rejects_processed_dataset_with_missing_rows(self) -> None:
+        """验证 CSV 文件行数少于 manifest 声明时返回 False。
+
+        manifest 声明 2 行，但修改 CSV 只剩 1 行，应检测到不匹配。
+        """
         data_config = {
             "path": "data/processed/own_cell/sequences/**/*.csv",
             "manifest": "data/processed/own_cell/manifest.yaml",
@@ -81,12 +128,17 @@ class PrepareTrainingDataTests(unittest.TestCase):
                 Path(temp_dir),
                 {"cycle_1.csv": [("0", "cycle_1"), ("1", "cycle_1")]},
             )
+            # 覆盖写入，减少行数
             sequence = Path(temp_dir) / "data" / "processed" / "own_cell" / "sequences" / "cycle_1.csv"
             sequence.write_text("time,soc,sequence_id\n0,0.5,cycle_1\n", encoding="utf-8")
 
             self.assertFalse(has_processed_training_data(data_config))
 
     def test_rejects_processed_dataset_with_invalid_manifest(self) -> None:
+        """验证 manifest 文件格式损坏时返回 False。
+
+        将 manifest 内容写入为无效 YAML 格式，应捕获解析异常。
+        """
         data_config = {
             "path": "data/processed/own_cell/sequences/**/*.csv",
             "manifest": "data/processed/own_cell/manifest.yaml",
@@ -100,6 +152,11 @@ class PrepareTrainingDataTests(unittest.TestCase):
             self.assertFalse(has_processed_training_data(data_config))
 
     def test_rejects_processed_dataset_when_raw_inputs_changed(self) -> None:
+        """验证原始输入文件路径与 manifest 记录不一致时返回 False。
+
+        manifest 记录的原始文件是 a.xlsx，但当前传入的原始文件是 b.xlsx，
+        应检测到路径不匹配。
+        """
         data_config = {
             "path": "data/processed/own_cell/sequences/**/*.csv",
             "manifest": "data/processed/own_cell/manifest.yaml",
@@ -117,6 +174,12 @@ class PrepareTrainingDataTests(unittest.TestCase):
     @patch("scripts.train.resolve_raw_paths")
     @patch("scripts.train.prepare_cycler_workbooks")
     def test_reuses_existing_processed_dataset_by_default(self, prepare_mock, resolve_mock) -> None:
+        """验证已有完整数据时不会重复调用数据转换。
+
+        当 manifest 签名与实际原始文件一致时：
+        - prepare_training_data 返回 False（未新建数据）
+        - prepare_cycler_workbooks 未被调用
+        """
         config = {
             "data": {
                 "raw_path": "data/raw/*.xlsx",
@@ -146,6 +209,11 @@ class PrepareTrainingDataTests(unittest.TestCase):
     @patch("scripts.train.resolve_raw_paths")
     @patch("scripts.train.prepare_cycler_workbooks")
     def test_upgrades_legacy_manifest_signature_without_reprocessing(self, prepare_mock, resolve_mock) -> None:
+        """验证对旧版 manifest（无 raw_file_signatures）自动升级签名而不重新处理。
+
+        旧版 manifest 可能只有 raw_files 列表没有签名字段。
+        此时应自动计算并补写 raw_file_signatures，不触发数据重新转换。
+        """
         config = {
             "data": {
                 "raw_path": "data/raw/*.xlsx",
@@ -159,6 +227,7 @@ class PrepareTrainingDataTests(unittest.TestCase):
             raw_path.parent.mkdir(parents=True)
             raw_path.write_bytes(b"source-data")
             resolve_mock.return_value = [raw_path]
+            # 构造无签名的旧版数据集
             self.write_processed_data(
                 Path(temp_dir),
                 {"cycle_1.csv": [("0", "cycle_1")]},
@@ -171,11 +240,17 @@ class PrepareTrainingDataTests(unittest.TestCase):
 
         self.assertFalse(prepared)
         prepare_mock.assert_not_called()
+        # 验证 manifest 已被升级，包含了签名
         self.assertEqual(metadata["raw_file_signatures"], expected_signatures)
 
     @patch("scripts.train.resolve_raw_paths")
     @patch("scripts.train.prepare_cycler_workbooks")
     def test_rebuilds_incomplete_processed_dataset(self, prepare_mock, resolve_mock) -> None:
+        """验证数据集不完整时（缺失 CSV 文件）自动触发重建。
+
+        manifest 声明了 2 个序列但只有 1 个 CSV 文件存在，
+        prepare_training_data 应触发 prepare_cycler_workbooks 重新生成。
+        """
         resolve_mock.return_value = [Path("a.xlsx")]
         config = {
             "data": {
@@ -208,6 +283,11 @@ class PrepareTrainingDataTests(unittest.TestCase):
     @patch("scripts.train.resolve_raw_paths")
     @patch("scripts.train.prepare_cycler_workbooks")
     def test_prepares_the_same_dataset_only_once_per_train_command(self, prepare_mock, resolve_mock) -> None:
+        """验证在同一训练命令中，相同的数据集只处理一次（去重机制）。
+
+        使用 prepared_datasets 集合跟踪已处理的数据集键值，
+        第二次调用 prepare_training_data 时应跳过转换。
+        """
         resolve_mock.return_value = [Path("a.xlsx")]
         config = {
             "data": {
@@ -222,6 +302,7 @@ class PrepareTrainingDataTests(unittest.TestCase):
             prepare_training_data(config, prepared_datasets)
             expected_output = (Path(temp_dir) / "data" / "processed" / "own_cell").resolve()
 
+        # 验证只调用了一次 prepare_cycler_workbooks
         prepare_mock.assert_called_once_with(
             [Path("a.xlsx")],
             expected_output,
@@ -232,6 +313,11 @@ class PrepareTrainingDataTests(unittest.TestCase):
     @patch("scripts.train.resolve_raw_paths")
     @patch("scripts.train.prepare_cycler_workbooks")
     def test_rebuilds_dataset_when_raw_content_changes(self, prepare_mock, resolve_mock) -> None:
+        """验证原始文件内容变更后自动触发数据重建。
+
+        先创建与 manifest 签名一致的数据集，然后修改原始文件内容，
+        此时文件签名会变化，应检测到不一致并触发重新转换。
+        """
         config = {
             "data": {
                 "raw_path": "data/raw/*.xlsx",
@@ -251,6 +337,7 @@ class PrepareTrainingDataTests(unittest.TestCase):
                 raw_files=[str(raw_path)],
                 raw_file_signatures=[raw_file_signature(raw_path)],
             )
+            # 修改文件内容，使签名变化
             raw_path.write_bytes(b"after")
             prepared = prepare_training_data(config)
             expected_output = (Path(temp_dir) / "data" / "processed" / "own_cell").resolve()
@@ -264,24 +351,49 @@ class PrepareTrainingDataTests(unittest.TestCase):
         )
 
     def test_requires_manifest_for_automatic_preparation(self) -> None:
+        """验证配置了 raw_path 但未配置 manifest 时抛出 ValueError。
+
+        自动数据准备需要 manifest 路径来定位输出位置和校验完整性。
+        """
         with self.assertRaisesRegex(ValueError, "data.manifest is required"):
             prepare_training_data({"data": {"raw_path": "data/raw/*.xlsx"}})
 
     def test_dataset_name_infers_processed_paths(self) -> None:
+        """验证 resolve_processed_data_paths 根据 dataset_name 正确生成默认路径。
+
+        给定 dataset_name="new_dataset"，应生成：
+        - path: data/processed/new_dataset/sequences/**/*.csv
+        - manifest: data/processed/new_dataset/manifest.yaml
+        """
         data_config = {"dataset_name": "new_dataset"}
 
         resolve_processed_data_paths(data_config)
 
-        self.assertEqual(data_config["path"], "data\\processed\\new_dataset\\sequences\\**\\*.csv")
-        self.assertEqual(data_config["manifest"], "data\\processed\\new_dataset\\manifest.yaml")
+        self.assertEqual(
+            Path(data_config["path"]),
+            Path("data") / "processed" / "new_dataset" / "sequences" / "**" / "*.csv",
+        )
+        self.assertEqual(
+            Path(data_config["manifest"]),
+            Path("data") / "processed" / "new_dataset" / "manifest.yaml",
+        )
 
     def test_dataset_name_rejects_parent_paths(self) -> None:
+        """验证 dataset_name 包含父目录引用（如 "../outside"）时抛出 ValueError。
+
+        dataset_name 必须是单一目录名，不允许路径穿越以防止安全问题。
+        """
         with self.assertRaisesRegex(ValueError, "single directory name"):
             resolve_processed_data_paths({"dataset_name": "../outside"})
 
     @patch("scripts.train.resolve_raw_paths")
     @patch("scripts.train.prepare_cycler_workbooks")
     def test_dataset_name_allows_preparation_without_manual_paths(self, prepare_mock, resolve_mock) -> None:
+        """验证只配置 dataset_name（不配置 path/manifest）也能自动完成数据准备。
+
+        当配置中只有 dataset_name 和 raw_path 时，
+        系统应自动推断 path 和 manifest 路径，并正确执行数据转换。
+        """
         resolve_mock.return_value = [Path("a.xlsx")]
         config = {"data": {"dataset_name": "new_dataset", "raw_path": "data/raw/*.xlsx"}}
 

@@ -1,0 +1,29 @@
+extends:
+  - ../_base_paper_9seq.yml
+
+experiment:
+  name: paper/table2_feature_ablation/a5_uitf_xmech
+
+data:
+  feature_columns:
+    - voltage
+    - current
+    - temperature
+    - force
+    - delta_f
+    - delta_q
+    - df_dt
+    - df_dq
+    - force_slope
+
+model:
+  name: lstm
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.0
+  pooling:
+    name: last
+  head:
+    name: regression
+    hidden_size: null
+    dropout: 0.0

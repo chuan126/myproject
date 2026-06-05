@@ -1,334 +1,304 @@
 # Battery SOC Estimation
 
-基于深度学习的电池 **SOC（State of Charge，荷电状态）** 估计项目。从自有电池循环仪导出的 Excel 工作簿出发，完成数据预处理、模型训练、评估全流程。
+这是一个面向电池荷电状态（SOC, State of Charge）估计的深度学习项目。主流程是把循环仪导出的 Excel 工作簿转换为统一的 canonical CSV，再按序列划分训练/验证/测试集，完成标准化、滑动窗口构造、模型训练和评估。
+
+```text
+data/raw/*.xlsx
+  -> data/processed/<dataset_name>/sequences/*.csv
+  -> optional downsampled processed dataset
+  -> train/val/test split
+  -> z-score normalization
+  -> sliding windows
+  -> model training / evaluation
+```
 
 ## 项目结构
 
-```
+```text
 myproject/
 ├── configs/
-│   ├── base/
-│   │   └── default.yaml          # 基础配置（所有实验共享的默认值）
-│   └── experiments/
-│       ├── temp.yaml              # 实验配置示例（4 特征 LSTM）
-│       └── test.yaml              # 实验配置示例（5 特征 LSTM）
+│   ├── base/default.yaml              # 公共默认配置
+│   └── experiments/                   # 单个实验的覆盖配置
 ├── data/
-│   ├── raw/                       # 原始 Excel 工作簿 (*.xlsx)
-│   └── processed/                 # 规范化 CSV（自动生成）
+│   ├── raw/                           # 原始 Excel 工作簿
+│   └── processed/                     # 自动生成的 canonical CSV
 ├── scripts/
-│   ├── prepare_data.py            # 离线数据转换：Excel → 规范化 CSV
-│   ├── train.py                   # 训练入口
-│   └── eval.py                    # 评估入口
+│   ├── prepare_data.py                # Excel -> canonical CSV
+│   ├── downsample_data.py             # canonical CSV -> downsampled canonical CSV
+│   ├── train.py                       # 训练入口
+│   └── eval.py                        # 评估入口
 ├── src/
-│   ├── data/                      # 数据流水线
-│   │   ├── converters/            # 自有设备 Excel 转换器
-│   │   ├── dataset.py             # SOCDataset、DataBundle、数据加载器构建
-│   │   ├── io.py                  # CSV 与 manifest 文件读写
-│   │   ├── preprocess.py          # Z-score 标准化器
-│   │   ├── schema.py              # 规范化数据契约与校验
-│   │   └── window.py              # 滑动窗口构建
-│   ├── models/                    # 模型组件
-│   │   ├── encoders/              # 编码器：LSTM、GRU、FCN、CNN、TCN
-│   │   ├── pooling/               # 池化：last、mean、max、attention
-│   │   ├── head.py                # 回归头
-│   │   ├── soc_model.py           # Encoder → Pooling → Head 组装
-│   │   └── registry.py            # 模型组件注册表与构建器
-│   ├── training/                  # 训练基础设施
-│   │   ├── trainer.py             # Trainer（早停训练循环）+ predict
-│   │   ├── checkpoint.py          # 检查点保存/加载
-│   │   ├── losses.py              # 损失函数注册表（MSE/MAE/SmoothL1）
-│   │   └── optimizers.py          # 优化器注册表（Adam/AdamW/SGD）
-│   ├── evaluation/                # 评估
-│   │   ├── metrics.py             # 回归指标（MSE/MAE/RMSE/MaxError/R²）
-│   │   └── plots.py               # 可视化（训练曲线、预测对比图）
-│   ├── experiment.py              # 实验管理（设备选择、评估保存）
-│   └── utils/                     # 工具
-│       ├── config.py              # YAML 配置加载与合并（支持 extends 继承）
-│       ├── logger.py              # 统一日志记录器
-│       ├── plugins.py             # 插件动态加载
-│       └── seed.py                # 全局随机种子
-├── tests/                         # 测试
-├── outputs/                       # 训练产出（自动生成）
-│   └── experiments/
-│       └── <experiment_name>/
-│           ├── checkpoints/
-│           ├── plots/
-│           ├── predictions.csv
-│           ├── metrics.json
-│           ├── summary.json
-│           └── history.json
+│   ├── data/                          # 数据转换、校验、标准化、滑窗、DataLoader
+│   ├── models/                        # LSTM/GRU/CNN/TCN/双流模型等
+│   ├── training/                      # Trainer、loss、optimizer、checkpoint
+│   ├── evaluation/                    # 指标和绘图
+│   ├── experiment.py                  # 实验输出与评估封装
+│   └── utils/                         # 配置、日志、随机种子、插件加载
+├── tests/                             # 单元测试
+├── outputs/experiments/               # 训练和评估产物
 └── requirements.txt
 ```
 
-## 架构设计
+## 环境准备
 
-### 数据流水线
+推荐使用已经创建好的 Anaconda 环境 `SOC`。
 
-```
-原始 Excel 工作簿               规范化 CSV                   滑动窗口                标准化特征
-┌──────────────┐   离线转换     ┌──────────────┐   窗口化     ┌──────────────┐   fit on   ┌──────────────┐
-│ .xlsx        │ ────────────→  │ sequence_id  │ ──────────→  │ (N, W, F)    │ ────────→  │ (N, W, F)    │
-│ (record +    │               │ time         │              │ 窗口特征      │  train set │ 标准化后      │
-│  auxTemp)    │               │ soc          │              │ + 目标值      │            │              │
-└──────────────┘               │ voltage ...  │              └──────────────┘            └──────────────┘
-                               └──────────────┘
-```
-
-关键设计决策：
-
-- **标准化器仅对训练集拟合**，验证集和测试集使用训练集的均值和标准差做变换，避免数据泄露。
-- **窗口以序列为边界**，不会跨序列滑动。窗口标签取窗口最后一个时间步的 SOC 值。
-- **按序列划分数据集**（而非按行随机划分），确保同一充放电循环的数据不会同时出现在训练集和测试集中。
-- **原始文件指纹**（SHA256 + 文件大小）写入 manifest，后续训练若原始文件未变则跳过转换。
-
-#### SOC 计算逻辑
-
-从循环仪 Excel 的 record 工作表中提取每个循环的充放电数据，通过安时积分法（Coulomb Counting）计算 SOC：
-
-- 基于充/放电总容量和累积电量推导 SOC
-- 1 Hz 去重采样（每秒保留一条记录）
-- 温度从 auxTemp 工作表通过 record_id 映射
-- 衍生特征：功率（voltage × current）、CC 容量（累积充电 - 累积放电）
-
-### 模型架构
-
-采用 **Encoder → Pooling → Head** 三段式可插拔架构：
-
-```
-输入 (batch, window_size, features)
-        │
-        ▼
-┌───────────────────┐
-│     Encoder        │  时序编码，提取每步特征
-│  LSTM / GRU /      │  output: (batch, window_size, feature_dim)
-│  FCN / CNN / TCN   │
-└───────────────────┘
-        │
-        ▼
-┌───────────────────┐
-│     Pooling         │  时间维聚合
-│  last / mean /      │  output: (batch, feature_dim)
-│  max / attention    │
-└───────────────────┘
-        │
-        ▼
-┌───────────────────┐
-│      Head           │  回归映射
-│  RegressionHead     │  output: (batch, 1)
-└───────────────────┘
-```
-
-#### 编码器说明
-
-| 编码器 | 类型 | 特点 |
-|--------|------|------|
-| LSTM | 循环网络 | 长序列依赖建模，适合时序数据 |
-| GRU | 循环网络 | 与 LSTM 类似，参数更少 |
-| FCN | 全连接 | 逐时间步独立处理，渐进减半通道（hidden_size → hidden_size/2 → ...），每层含 BatchNorm1d |
-| CNN | 一维卷积 | 沿时间轴提取局部模式，渐进减半通道，每层含 BatchNorm1d |
-| TCN | 时序卷积 | 膨胀卷积扩大感受野 |
-
-#### 池化策略说明
-
-| 池化 | 行为 |
-|------|------|
-| last | 取最后一个时间步的输出 |
-| mean | 对所有时间步取平均 |
-| max | 对所有时间步取最大值 |
-| attention | 学习每个时间步的权重，加权求和 |
-
-#### 回归头
-
-- `hidden_size` 为 null 时：单层 Linear(feature_dim, 1)
-- `hidden_size` 非 null 时：Linear → ReLU → Dropout → Linear 两层结构
-
-### 配置系统
-
-配置采用两层继承机制：
-
-```
-configs/base/default.yaml       ← 所有实验的公共默认值
-        ↑ extends
-configs/experiments/*.yaml      ← 实验特定覆盖
-```
-
-实验配置文件中的 `extends` 字段指向一个或多个基础配置，最终配置由基础配置深度合并实验覆盖得到。配置中支持通过 `plugins` 字段声明要导入的外部模块（利用注册副作用扩展组件）。
-
-### 训练流程
-
-1. **数据准备**：检查原始 Excel 是否有对应的 canonical CSV 产物，若无则自动调用 `prepare_cycler_workbooks` 转换。
-2. **数据加载**：加载所有 CSV → 按序列划分 train/val/test → 仅在训练集上拟合标准化器 → 构建滑动窗口 → 封装为 DataLoader。
-3. **模型构建**：根据 `model` 配置节构建 Encoder + Pooling + Head。
-4. **训练循环**：每个 epoch 后验证，保存最佳模型检查点。支持早停（`patience` + `min_delta`）。
-5. **评估**：加载最佳检查点 → 测试集推理 → 计算 MSE/MAE/RMSE/MaxError/R² → 生成预测曲线图。
-
-## 快速开始
-
-### 环境准备
-
-```bash
-conda create -n SOC python=3.10
+```powershell
 conda activate SOC
 pip install -r requirements.txt
 ```
 
-依赖项：PyTorch 2.12.0 (CUDA 12.3)、NumPy、Pandas、PyYAML、Matplotlib、openpyxl、tqdm。
+如果在非交互脚本或当前终端没有激活环境，也可以这样运行：
 
-### 1. 准备数据
-
-将循环仪导出的 Excel 工作簿放入 `data/raw/` 目录。每个工作簿需包含：
-- `record` 工作表：含数据序号、循环号、工步类型、时间、电流、电压等列
-- `auxTemp` 工作表：含数据序号和温度列
-
-数据转换会在训练时自动完成，也可手动运行：
-
-```bash
-python scripts/prepare_data.py \
-    --input "data/raw/0.1C.xlsx" "data/raw/0.2C.xlsx" \
-    --output data/processed/my_dataset
+```powershell
+conda run -n SOC python scripts/train.py --configs configs/experiments/lstm_25degC_0.5C_3loads.yaml
 ```
 
-### 2. 创建实验配置
+## 原始 Excel 要求
 
-在 `configs/experiments/` 下创建 YAML 配置文件，继承基础配置并指定数据集和模型：
+每个原始工作簿放在 `data/raw/` 下，当前转换器要求至少包含这些工作表和列：
+
+| 工作表 | 原始列 | 转换后用途 |
+|---|---|---|
+| `record` | `绝对时间` | 用于时间对齐，并转换为相对秒 `time` |
+| `record` | `电流(A)` | 转换为 `current`，充电为正、放电为负 |
+| `record` | `电压(V)` | 转换为 `voltage` |
+| `record` | `工步类型` | 判断充/放电阶段，用于电流符号和 SOC 计算 |
+| `auxAdapter` | `绝对时间`, `PV1` | 按绝对时间对齐后得到 `force` |
+| `auxTemp` | `绝对时间`, `T3` | 按绝对时间对齐后得到 `temperature` |
+
+三张表按 `绝对时间` 对齐，不依赖 `record_id`。转换后会按 1 Hz 输出采样网格，并生成连续行号 `id=1,2,3,...`。
+
+## canonical CSV 字段
+
+转换后的 CSV 默认包含以下字段：
+
+| 字段 | 来源或计算方式 |
+|---|---|
+| `id` | 采样后连续行号，从 1 开始 |
+| `time` | `record["绝对时间"]` 转为相对秒，并按 1 Hz 采样输出 |
+| `voltage` | `record["电压(V)"]` |
+| `current` | `record["电流(A)"]`，充电正、放电负 |
+| `power` | `voltage * current` |
+| `cc_capacity` | 累计充电 Ah - 累计放电 Ah |
+| `force` | `auxAdapter["PV1"]`，按绝对时间对齐 |
+| `temperature` | `auxTemp["T3"]`，按绝对时间对齐 |
+| `delta_f` | `force(t) - force(0)` |
+| `delta_q` | `cc_capacity(t) - cc_capacity(0)` |
+| `df_dt` | 相邻采样点的 `Δforce / Δtime`，分母接近 0 时为 0 |
+| `df_dq` | 相邻采样点的 `Δforce / Δcc_capacity`，分母接近 0 时为 0 |
+| `force_slope` | `delta_f / delta_q`，分母接近 0 时为 0 |
+| `soc` | 保持当前库内逻辑：按完整充放电序列的累计充/放电容量归一化到 `[0, 1]` |
+| `sequence_id` | 源 Excel 文件名 stem；训练划分和滑窗边界依赖该列 |
+
+注意：`time` 是采样后的秒级网格标签。某一行可能来自原始时间 0.6 s 的记录，但输出 `time` 为 1.0 s，这是当前 1 Hz 采样策略的一部分。
+
+## 手动转换数据
+
+训练时如果配置了 `data.raw_path`，脚本会自动准备数据。也可以手动转换：
+
+```powershell
+conda run -n SOC python scripts/prepare_data.py `
+  --input "data/raw/*.xlsx" `
+  --output data/processed/own_cell_25degC_0.5C_3loads `
+  --overwrite
+```
+
+生成内容：
+
+```text
+data/processed/<dataset_name>/
+├── manifest.yaml
+└── sequences/
+    ├── <sequence_id_1>.csv
+    ├── <sequence_id_2>.csv
+    └── ...
+```
+
+`manifest.yaml` 会记录列名、序列数量、行数、采样周期、SOC 方法以及原始文件签名。训练脚本会用它判断 processed 数据是否仍然可复用。
+
+## 从 canonical CSV 降采样
+
+降采样从已经生成好的 `data/processed/<dataset_name>/sequences/*.csv` 开始，不重新解析 Excel。脚本会按每条序列的 `time` 时间网格抽样，保留抽样点的 `soc` 和基础传感器列，重新生成连续 `id`，并在降采样后的序列上重新计算 `delta_f`、`delta_q`、`df_dt`、`df_dq`、`force_slope`。
+
+例如从 1s canonical 数据生成 5s 数据集：
+
+```powershell
+conda run -n SOC python scripts/downsample_data.py `
+  --input data/processed/own_cell_25degC_0.5C_3loads `
+  --output data/processed/own_cell_25degC_0.5C_3loads_5s `
+  --interval-s 5 `
+  --overwrite
+```
+
+常用采样间隔可以分别生成：
+
+```powershell
+conda run -n SOC python scripts/downsample_data.py `
+  --input data/processed/own_cell_25degC_0.5C_3loads `
+  --output data/processed/own_cell_25degC_0.5C_3loads_10s `
+  --interval-s 10 `
+  --overwrite
+
+conda run -n SOC python scripts/downsample_data.py `
+  --input data/processed/own_cell_25degC_0.5C_3loads `
+  --output data/processed/own_cell_25degC_0.5C_3loads_30s `
+  --interval-s 30 `
+  --overwrite
+```
+
+生成后可以检查 `manifest.yaml`，确认 `sampling_period_s` 已变为目标采样间隔：
+
+```powershell
+Get-Content data/processed/own_cell_25degC_0.5C_3loads_5s/manifest.yaml
+```
+
+训练降采样数据时，把实验配置里的 `data.dataset_name` 改成对应的新数据集名，例如 `own_cell_25degC_0.5C_3loads_5s`。窗口大小 `window_size` 仍然表示时间步数量；如果希望保持相近的物理时间跨度，需要随着采样间隔调整它。
+
+## 训练
+
+当前项目的训练入口是：
+
+```powershell
+conda run -n SOC python scripts/train.py --configs configs/experiments/lstm_25degC_0.5C_3loads.yaml
+```
+
+也可以一次运行多个实验配置：
+
+```powershell
+conda run -n SOC python scripts/train.py --configs "configs/experiments/*.yaml"
+```
+
+训练产物默认输出到：
+
+```text
+outputs/experiments/<experiment_name>/
+├── best.pt
+├── predictions.csv
+├── summary.json
+└── plots/
+    ├── soc_prediction.png
+    ├── soc_error.png
+    ├── pred_vs_true.png
+    ├── soc_by_sequence.png
+    └── gate_weights.png  # 仅门控双流模型生成
+```
+
+## 实验配置示例
+
+实验配置通过 `extends` 继承 `configs/base/default.yaml`，只覆盖需要改变的部分。
 
 ```yaml
 extends:
   - ../base/default.yaml
 
 experiment:
-  name: my_lstm_experiment
+  name: lstm_25degC_0.5C_3loads
 
 data:
-  dataset_name: my_dataset           # 对应 data/processed/<name>
-  raw_path: data/raw/*.xlsx          # 原始 Excel 路径
+  dataset_name: own_cell_25degC_0.5C_3loads
+  raw_path: data/raw/*.xlsx
   feature_columns:
     - voltage
     - current
     - temperature
-    - power
     - cc_capacity
+    - power
+    - force
+  window_size: 20
+  stride: 1
+  num_workers: 0
 
 model:
-  name: lstm                         # 编码器：lstm / gru / fcn / cnn / tcn
+  name: lstm
   hidden_size: 64
   num_layers: 2
-  dropout: 0.1
+  dropout: 0.0
   pooling:
-    name: last                       # 池化：last / mean / max / attention
+    name: last
   head:
+    name: regression
     hidden_size: null
     dropout: 0.0
 
 train:
   batch_size: 256
-  epochs: 120
+  epochs: 50
   learning_rate: 0.001
   optimizer:
     name: adam
     weight_decay: 0.0
   loss:
-    name: mse                        # 损失函数：mse / mae / smooth_l1
+    name: mse
   patience: 10
 ```
 
-### 3. 训练
+`data.feature_columns` 决定模型实际输入哪些列。canonical CSV 中可以有更多列，例如 `delta_f`、`df_dt`、`delta_q`、`df_dq`、`force_slope`，只有写进 `feature_columns` 才会进入模型。
 
-```bash
-# 训练指定实验
-python scripts/train.py --configs configs/experiments/my_experiment.yaml
+## 数据划分和预处理
 
-# 训练多个实验（glob 模式）
-python scripts/train.py --configs "configs/experiments/*.yaml"
+- 数据按 `sequence_id` 划分 train/val/test，不按行随机划分。
+- 默认至少需要 3 个不同的 `sequence_id`，否则无法同时得到 train、val、test。
+- 标准化器只在训练集特征上拟合，验证集和测试集复用训练集均值/标准差，避免数据泄露。
+- 滑动窗口不会跨越 `sequence_id` 边界。
+- 窗口标签取窗口最后一个时间步的 `soc`。
+
+## 模型
+
+默认架构是：
+
+```text
+input window (batch, window_size, features)
+  -> encoder
+  -> pooling
+  -> regression head
+  -> SOC prediction
 ```
 
-训练产物输出到 `outputs/experiments/<experiment_name>/`，包含：
-- `checkpoints/best.pt` — 最佳模型检查点
-- `history.json` — 每轮训练/验证损失
-- `metrics.json` — 测试集评估指标
-- `predictions.csv` — 每条测试样本的预测值
-- `plots/` — 训练曲线、预测对比图、各序列 SOC 时序图
+当前注册的常用组件：
 
-### 4. 评估已有检查点
+| 配置项 | 可选值 |
+|---|---|
+| `model.name` | `lstm`, `gru`, `fcn`, `cnn`, `tcn`, `informer` |
+| `model.pooling.name` | `last`, `mean`, `max`, `attention` |
+| `model.head.name` | `regression` |
+| `model.architecture.name` | 默认 `encoder_pooling_head`，也支持 `dual_stream` |
+| `train.loss.name` | `mse`, `mae`, `smooth_l1` |
+| `train.optimizer.name` | `adam`, `adamw`, `sgd` |
 
-```bash
-# 评估原始测试集
-python scripts/eval.py --checkpoint outputs/experiments/<name>/checkpoints/best.pt
+## 评估
 
-# 对外部新数据评估
-python scripts/eval.py \
-    --checkpoint outputs/experiments/<name>/checkpoints/best.pt \
-    --raw-input "data/raw/new_battery.xlsx" \
-    --dataset-name new_battery_test
+评估已有 checkpoint：
+
+```powershell
+conda run -n SOC python scripts/eval.py `
+  --checkpoint outputs/experiments/lstm_25degC_0.5C_3loads/best.pt
 ```
 
-## 配置参考
+用已有 checkpoint 评估新的外部 Excel：
 
-### data
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `dataset_name` | str | — | 对应 `data/processed/<name>` 目录 |
-| `raw_path` | str/list | — | 原始 Excel 路径或 glob |
-| `feature_columns` | list | — | 模型输入特征列名 |
-| `window_size` | int | 20 | 滑动窗口大小 |
-| `stride` | int | 1 | 窗口滑动步长 |
-| `split.train` | float | 0.8 | 训练集比例 |
-| `split.val` | float | 0.1 | 验证集比例 |
-| `split.test` | float | 0.1 | 测试集比例 |
-| `split_column` | str | null | 使用数据中的列做划分（null 则随机划分） |
-| `split_seed` | int | 24 | 数据集划分随机种子 |
-| `num_workers` | int | 0 | DataLoader 工作进程数 |
-
-### model
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `name` | str | lstm | 编码器：lstm / gru / fcn / cnn / tcn |
-| `hidden_size` | int | 64 | 隐藏层大小/通道数 |
-| `num_layers` | int | 2 | 层数 |
-| `dropout` | float | 0.0 | 编码器内 Dropout 比例 |
-| `kernel_size` | int | 3 | 卷积核大小（仅 CNN、TCN） |
-| `pooling.name` | str | last | 池化策略：last / mean / max / attention |
-| `head.hidden_size` | int | null | 回归头隐层大小（null 为单层） |
-| `head.dropout` | float | 0.0 | 回归头 Dropout 比例 |
-
-### train
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `batch_size` | int | 64 | 批大小 |
-| `epochs` | int | 50 | 最大训练轮数 |
-| `learning_rate` | float | 0.001 | 学习率 |
-| `optimizer.name` | str | adam | 优化器：adam / adamw / sgd |
-| `optimizer.weight_decay` | float | 0.0 | 权重衰减 |
-| `loss.name` | str | mse | 损失函数：mse / mae / smooth_l1 |
-| `patience` | int | 10 | 早停耐心值 |
-| `min_delta` | float | 0.0 | 判定改善的最小损失下降量 |
-| `device` | str | auto | 计算设备：auto / cuda / cpu |
-| `seed` | int | 42 | 全局随机种子 |
-
-## 扩展
-
-### 注册自定义组件
-
-项目使用注册表模式，可以在外部模块中注册新的编码器、池化、回归头、损失函数或优化器，然后通过配置的 `plugins` 导入：
-
-```python
-# my_plugins.py
-from src.models.registry import register_encoder
-from src.training.losses import register_loss
-
-register_encoder("my_encoder", my_encoder_builder)
-register_loss("my_loss", my_loss_builder)
+```powershell
+conda run -n SOC python scripts/eval.py `
+  --checkpoint outputs/experiments/lstm_25degC_0.5C_3loads/best.pt `
+  --raw-input "data/raw/new_battery.xlsx" `
+  --dataset-name new_battery_eval
 ```
 
-```yaml
-# 配置中声明
-plugins:
-  - my_plugins
+外部评估会复用 checkpoint 中保存的特征列、标准化器和模型配置。
+
+## 常用验证命令
+
+```powershell
+conda run -n SOC python -m unittest tests.test_cycler_workbook
+conda run -n SOC python -m unittest tests.test_dataset
+conda run -n SOC python -m unittest tests.test_train
+conda run -n SOC python -m py_compile src/data/converters/cycler_workbook.py
 ```
 
-### 添加新特征
+## 常见注意点
 
-在 `feature_columns` 中添加列名即可，前提是规范化 CSV 中包含该列（若需从原始 Excel 提取，则修改 `cycler_workbook.py` 中的转换逻辑）。
+- `data/raw/` 是原始数据目录，通常只放 Excel，不手工改动转换逻辑。
+- `data/processed/` 和 `outputs/` 是生成产物，可以通过重新转换或重新训练再生成。
+- 如果原始 Excel 文件数量、文件内容或 glob 范围变化，训练脚本会重新生成 processed 数据。
+- 如果实验效果很差，先检查 train/val/test 是否只有很少序列。当前按序列划分时，3 条数据会变成训练、验证、测试各 1 条，泛化压力很大。
+- 如果新增特征，通常需要同时更新 `src/data/converters/cycler_workbook.py`、相关测试，以及实验配置中的 `data.feature_columns`。

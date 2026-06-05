@@ -1,0 +1,24 @@
+extends:
+  - ../_base_paper_9seq.yml
+
+experiment:
+  name: paper/table1_baselines/m1_lstm_uitf
+
+data:
+  feature_columns:
+    - voltage
+    - current
+    - temperature
+    - force
+
+model:
+  name: lstm
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.0
+  pooling:
+    name: last
+  head:
+    name: regression
+    hidden_size: null
+    dropout: 0.0

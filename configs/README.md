@@ -177,12 +177,16 @@ loss:
 
 `mae` 与 `l1` 等价。为兼容旧配置，`loss: mse` 仍可运行。
 
-## 配置产物
+## 输出产物
 
-训练时会将最终合并后的完整配置写入：
+训练默认只保留精简产物：
 
 ```text
-outputs/experiments/<experiment.name>/resolved_config.yaml
+outputs/experiments/<experiment.name>/
+├── best.pt
+├── summary.json
+├── predictions.csv
+└── plots/
 ```
 
-这份文件用于记录真实训练参数，不应作为新的实验配置手动维护。
+完整配置、标准化器和数据划分会随 checkpoint 保存在 `best.pt` 中。

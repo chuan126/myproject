@@ -1,0 +1,24 @@
+extends:
+  - ../_base_paper_9seq.yml
+
+experiment:
+  name: paper/table3_structure_ablation/b1_lstm_main
+
+data:
+  feature_columns:
+    - voltage
+    - current
+    - temperature
+    - force
+
+model:
+  name: lstm
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.0
+  pooling:
+    name: last
+  head:
+    name: regression
+    hidden_size: null
+    dropout: 0.0
