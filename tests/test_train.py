@@ -25,7 +25,13 @@ from unittest.mock import patch
 
 import yaml
 
-from scripts.train import has_processed_training_data, prepare_training_data, resolve_processed_data_paths
+from scripts.train import (
+    has_processed_training_data,
+    prepare_output_dir,
+    prepare_training_data,
+    resolve_experiment_output_dir,
+    resolve_processed_data_paths,
+)
 from src.data import raw_file_signature
 
 
@@ -407,6 +413,98 @@ class PrepareTrainingDataTests(unittest.TestCase):
             overwrite=True,
             extra_record_columns=(),
         )
+
+    def test_resolves_legacy_experiment_output_dir_without_run_name(self) -> None:
+        """验证未配置 run_name 时保持旧版输出目录兼容。"""
+        config = {
+            "experiment": {"name": "paper/table1/m1_lstm"},
+            "output": {"dir": "outputs/experiments"},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = resolve_experiment_output_dir(config, Path(temp_dir))
+
+        self.assertEqual(
+            output_dir,
+            Path(temp_dir) / "outputs" / "experiments" / "paper" / "table1" / "m1_lstm",
+        )
+
+    @patch("scripts.train.datetime")
+    def test_auto_run_name_adds_timestamp_subdirectory(self, datetime_mock) -> None:
+        """验证 run_name: auto 会在实验名首段后插入时间戳目录。"""
+        datetime_mock.now.return_value.strftime.return_value = "20260616_153000"
+        config = {
+            "experiment": {"name": "paper/table1/m1_lstm", "run_name": "auto"},
+            "output": {"dir": "outputs/experiments"},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = resolve_experiment_output_dir(config, Path(temp_dir))
+
+        self.assertEqual(config["experiment"]["run_name"], "20260616_153000")
+        self.assertEqual(
+            output_dir,
+            Path(temp_dir)
+            / "outputs"
+            / "experiments"
+            / "paper"
+            / "20260616_153000"
+            / "table1"
+            / "m1_lstm"
+        )
+
+    def test_auto_run_name_can_be_shared_across_batch(self) -> None:
+        """验证批量训练可为多个配置复用同一个自动运行名。"""
+        config = {
+            "experiment": {"name": "paper/table2/a1_uit", "run_name": "auto"},
+            "output": {"dir": "outputs/experiments"},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = resolve_experiment_output_dir(config, Path(temp_dir), auto_run_name="20260616_210000")
+
+        self.assertEqual(config["experiment"]["run_name"], "20260616_210000")
+        self.assertEqual(
+            output_dir,
+            Path(temp_dir)
+            / "outputs"
+            / "experiments"
+            / "paper"
+            / "20260616_210000"
+            / "table2"
+            / "a1_uit",
+        )
+
+    def test_run_name_rejects_nested_paths(self) -> None:
+        """验证 run_name 只能是单级目录名，避免把运行目录打散。"""
+        config = {
+            "experiment": {"name": "m1_lstm", "run_name": "../bad"},
+            "output": {"dir": "outputs/experiments"},
+        }
+
+        with self.assertRaisesRegex(ValueError, "single directory name"):
+            resolve_experiment_output_dir(config, Path("root"))
+
+    def test_prepare_output_dir_blocks_existing_files_by_default(self) -> None:
+        """验证默认不覆盖已有训练输出产物。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "experiment"
+            output_dir.mkdir()
+            (output_dir / "summary.json").write_text("{}", encoding="utf-8")
+
+            with self.assertRaisesRegex(FileExistsError, "already contains files"):
+                prepare_output_dir(output_dir, overwrite=False)
+
+    def test_prepare_output_dir_allows_existing_files_when_overwrite_enabled(self) -> None:
+        """验证显式开启 output.overwrite 后允许复用已有目录。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "experiment"
+            output_dir.mkdir()
+            (output_dir / "summary.json").write_text("{}", encoding="utf-8")
+
+            prepare_output_dir(output_dir, overwrite=True)
+
+            self.assertTrue(output_dir.exists())
 
 
 if __name__ == "__main__":

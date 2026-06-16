@@ -1,0 +1,48 @@
+tuning:
+  direction: minimize
+  metric: best_val_loss
+  search_space:
+    learning_rate:
+      type: float
+      low: 1.0e-5
+      high: 3.0e-3
+      log: true
+      targets:
+        - train.learning_rate
+    weight_decay:
+      type: float
+      low: 1.0e-6
+      high: 1.0e-2
+      log: true
+      targets:
+        - train.optimizer.weight_decay
+    hidden_size:
+      type: categorical
+      choices:
+        - 32
+        - 64
+        - 96
+        - 128
+      targets:
+        - model.main_branch.encoder.hidden_size
+        - model.mech_branch.encoder.hidden_size
+    num_layers:
+      type: int
+      low: 1
+      high: 3
+      targets:
+        - model.main_branch.encoder.num_layers
+        - model.mech_branch.encoder.num_layers
+    dropout:
+      type: float
+      low: 0.0
+      high: 0.4
+      targets:
+        - model.main_branch.encoder.dropout
+        - model.mech_branch.encoder.dropout
+    head_dropout:
+      type: float
+      low: 0.0
+      high: 0.4
+      targets:
+        - model.head.dropout

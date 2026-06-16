@@ -1,0 +1,6 @@
+extends:
+  - ../../paper/table4_downsampling/c3_10s_dsmi_li.yaml
+  - ../_base_dual_stream_tune.yml
+
+experiment:
+  name: paper_tune/table4_downsampling/c3_10s_dsmi_li

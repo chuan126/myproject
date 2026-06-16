@@ -1,0 +1,6 @@
+extends:
+  - ../../paper/table2_feature_ablation/a5_uitf_xmech.yaml
+  - ../_base_single_stream_tune.yml
+
+experiment:
+  name: paper_tune/table2_feature_ablation/a5_uitf_xmech

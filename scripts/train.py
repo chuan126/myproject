@@ -14,6 +14,7 @@ import argparse
 import csv
 import glob
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -31,6 +32,7 @@ from src.utils import get_logger, load_config, load_plugins, seed_everything
 BASE_CONFIG = ROOT / "configs" / "base" / "default.yaml"
 # 默认的实验配置 glob 模式，当命令行未指定时可扫描所有实验
 DEFAULT_CONFIG_PATTERN = "configs/experiments/*.yaml"
+AUTO_RUN_NAME = "auto"
 
 
 def parse_args() -> argparse.Namespace:
@@ -80,6 +82,58 @@ def resolve_config_paths(patterns: list[str]) -> list[Path]:
             if path not in resolved:
                 resolved.append(path)
     return resolved
+
+
+def resolve_experiment_output_dir(
+    config: dict,
+    root: Path = ROOT,
+    auto_run_name: str | None = None,
+) -> Path:
+    """根据实验配置解析训练输出目录。
+
+    `experiment.name` 表示稳定的实验身份；可选的 `experiment.run_name`
+    表示一次具体运行。当 run_name 为 "auto" 时自动生成时间戳目录名。
+
+    Args:
+        config: 完整实验配置字典。
+        root: 项目根目录，测试中可注入临时目录。
+        auto_run_name: 本次训练命令共享的自动运行名。
+
+    Returns:
+        训练输出目录的绝对路径。
+
+    Raises:
+        ValueError: run_name 不是单级目录名。
+    """
+    output_dir = Path(config["output"]["dir"])
+    if not output_dir.is_absolute():
+        output_dir = root / output_dir
+    experiment_path = Path(config["experiment"]["name"])
+
+    run_name = config["experiment"].get("run_name")
+    if run_name in (None, ""):
+        return output_dir / experiment_path
+    run_name = str(run_name)
+    if run_name.lower() == AUTO_RUN_NAME:
+        run_name = auto_run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
+        config["experiment"]["run_name"] = run_name
+    run_path = Path(run_name)
+    if run_path.name != run_name or run_name in {".", ".."}:
+        raise ValueError("experiment.run_name must be a single directory name or 'auto'.")
+    parts = experiment_path.parts
+    if not parts:
+        raise ValueError("experiment.name must not be empty.")
+    return output_dir / parts[0] / run_name / Path(*parts[1:])
+
+
+def prepare_output_dir(output_dir: Path, overwrite: bool) -> None:
+    """创建训练输出目录，并在未允许覆盖时阻止覆盖已有产物。"""
+    if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
+        raise FileExistsError(
+            f"Output directory already contains files: {output_dir}. "
+            "Set experiment.run_name: auto for a new run, or set output.overwrite: true to reuse it."
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
 
 
 def resolve_raw_paths(patterns: str | list[str]) -> list[Path]:
@@ -318,7 +372,11 @@ def prepare_training_data(config: dict, prepared_datasets: set[tuple] | None = N
     return True
 
 
-def run_experiment(config_path: Path, prepared_datasets: set[tuple] | None = None) -> None:
+def run_experiment(
+    config_path: Path,
+    prepared_datasets: set[tuple] | None = None,
+    auto_run_name: str | None = None,
+) -> None:
     """训练并评估单个实验配置。
 
     完整流程：
@@ -332,12 +390,13 @@ def run_experiment(config_path: Path, prepared_datasets: set[tuple] | None = Non
     Args:
         config_path: 实验 YAML 配置文件的绝对路径。
         prepared_datasets: 可选集合，用于跨实验去重数据准备。
+        auto_run_name: 本次训练命令共享的自动运行名。
     """
     config = load_config(BASE_CONFIG, config_path)
     load_plugins(config)
     seed_everything(int(config["seed"]))
     logger = get_logger()
-    output_dir = ROOT / config["output"]["dir"] / config["experiment"]["name"]
+    output_dir = resolve_experiment_output_dir(config, auto_run_name=auto_run_name)
     device = select_device(config["train"].get("device", "auto"))
 
     # 按需准备规范化数据
@@ -352,7 +411,11 @@ def run_experiment(config_path: Path, prepared_datasets: set[tuple] | None = Non
     criterion = build_loss(config["train"]["loss"])
     optimizer = build_optimizer(config["train"].get("optimizer", "adam"), model.parameters(), config["train"])
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    overwrite_output = config["output"].get("overwrite", False)
+    if not isinstance(overwrite_output, bool):
+        raise ValueError("output.overwrite must be a boolean.")
+    prepare_output_dir(output_dir, overwrite_output)
+    logger.info("Writing experiment outputs to %s.", output_dir)
     checkpoint_path = output_dir / "best.pt"
 
     # 创建训练器并开始训练
@@ -402,8 +465,9 @@ def main() -> None:
     """
     args = parse_args()
     prepared_datasets: set[tuple] = set()
+    auto_run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
     for config_path in resolve_config_paths(args.configs):
-        run_experiment(config_path, prepared_datasets)
+        run_experiment(config_path, prepared_datasets, auto_run_name=auto_run_name)
 
 
 if __name__ == "__main__":

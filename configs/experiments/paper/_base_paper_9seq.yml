@@ -1,13 +1,16 @@
 extends:
   - ../../base/default.yaml
 
+experiment:
+  run_name: auto
+
 data:
   dataset_name: data
   raw_path: data/raw/*.xlsx
   split_column: null
   split_rules:
     test:
-      - "*2000N*"
+      - "2000N_25degC_0.5C"
     remaining:
       train: 0.67
       val: 0.33

@@ -1,0 +1,6 @@
+extends:
+  - ../../paper/table1_baselines/m3_dsmi_li.yaml
+  - ../_base_dual_stream_tune.yml
+
+experiment:
+  name: paper_tune/table1_baselines/m3_dsmi_li

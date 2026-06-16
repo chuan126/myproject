@@ -25,6 +25,7 @@ extends:
 
 experiment:
   name: lstm_last_linear_adam_base_features
+  run_name: auto
 
 data:
   dataset_name: own_cell_base_rates
@@ -59,7 +60,7 @@ train:
   patience: 10
 ```
 
-`dataset_name` 表示数据处理产物，`experiment.name` 表示模型实验结果。多个实验可以使用相同的 `dataset_name`，但应使用不同的 `experiment.name`。
+`dataset_name` 表示数据处理产物，`experiment.name` 表示模型实验身份。多个实验可以使用相同的 `dataset_name`，但应使用不同的 `experiment.name`。如果需要在同一组实验下保留多轮参数尝试，设置 `experiment.run_name: auto` 自动生成运行子目录。
 
 ## 顶层参数
 
@@ -68,7 +69,9 @@ train:
 | `extends` | 继承基础配置，实验文件只覆盖需要比较的字段 | 通常为 `../base/default.yaml` |
 | `seed` | 控制随机初始化与可复现实验 | 非负整数，例如 `42` |
 | `experiment.name` | 实验输出目录名称 | 唯一、可读的字符串 |
+| `experiment.run_name` | 一次具体运行；为 `auto` 时使用本次训练命令共享的时间戳 | `null`、`auto` 或单级目录名 |
 | `output.dir` | 所有实验结果的根目录 | 路径，例如 `outputs/experiments` |
+| `output.overwrite` | 目标输出目录非空时是否允许覆盖 | `false` 或 `true`，默认 `false` |
 
 ## 数据参数 `data`
 
@@ -188,5 +191,15 @@ outputs/experiments/<experiment.name>/
 ├── predictions.csv
 └── plots/
 ```
+
+如果配置了 `experiment.run_name`，产物会插入到 `experiment.name` 的第一段之后：
+
+```text
+outputs/experiments/<experiment.name.first_part>/<experiment.run_name>/<experiment.name.remaining_parts>/
+```
+
+例如 `experiment.name: paper/table1_baselines/m1_lstm_uitf`、`experiment.run_name: auto` 会写入 `outputs/experiments/paper/<YYYYMMDD_HHMMSS>/table1_baselines/m1_lstm_uitf/`。
+
+默认 `output.overwrite: false`，目标目录已有文件时训练会停止，避免覆盖旧结果。
 
 完整配置、标准化器和数据划分会随 checkpoint 保存在 `best.pt` 中。

@@ -6,4 +6,5 @@ PyYAML
 matplotlib
 openpyxl
 tqdm
+optuna
 torch==2.12.0+cu130

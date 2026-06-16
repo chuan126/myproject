@@ -1,0 +1,6 @@
+extends:
+  - ../../paper/table3_structure_ablation/b3_informer_all.yaml
+  - ../_base_single_stream_tune.yml
+
+experiment:
+  name: paper_tune/table3_structure_ablation/b3_informer_all

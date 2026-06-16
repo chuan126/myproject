@@ -2,6 +2,7 @@ seed: 42
 
 experiment:
   name: default
+  run_name: null
 
 data:
   format: canonical_csv
@@ -41,3 +42,4 @@ train:
 
 output:
   dir: outputs/experiments
+  overwrite: false

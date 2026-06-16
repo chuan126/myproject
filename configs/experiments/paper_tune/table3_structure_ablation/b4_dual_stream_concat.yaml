@@ -1,0 +1,6 @@
+extends:
+  - ../../paper/table3_structure_ablation/b4_dual_stream_concat.yaml
+  - ../_base_dual_stream_tune.yml
+
+experiment:
+  name: paper_tune/table3_structure_ablation/b4_dual_stream_concat

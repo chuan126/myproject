@@ -51,7 +51,7 @@ data/raw/*.xlsx -> data/processed/data
 配置文件使用 `sequence_id` 规则划分数据集：
 
 ```text
-test:      sequence_id 匹配 *2000N*
+test:      sequence_id 精确匹配 2000N_25degC_0.5C
 train/val: 其它 sequence_id 按比例随机划分
 ```
 
@@ -84,7 +84,7 @@ data/processed/data
 输出目录：
 
 ```text
-outputs/experiments/paper/table1_baselines/
+outputs/experiments/paper/<YYYYMMDD_HHMMSS>/table1_baselines/
 ```
 
 ### 2. 运行表 2：输入特征消融
@@ -96,7 +96,7 @@ python scripts/train.py --configs configs/experiments/paper/table2_feature_ablat
 输出目录：
 
 ```text
-outputs/experiments/paper/table2_feature_ablation/
+outputs/experiments/paper/<YYYYMMDD_HHMMSS>/table2_feature_ablation/
 ```
 
 ### 3. 运行表 3：结构消融
@@ -108,7 +108,7 @@ python scripts/train.py --configs configs/experiments/paper/table3_structure_abl
 输出目录：
 
 ```text
-outputs/experiments/paper/table3_structure_ablation/
+outputs/experiments/paper/<YYYYMMDD_HHMMSS>/table3_structure_ablation/
 ```
 
 ### 4. 生成表 4 所需降采样数据
@@ -139,7 +139,7 @@ python scripts/train.py --configs configs/experiments/paper/table4_downsampling/
 输出目录：
 
 ```text
-outputs/experiments/paper/table4_downsampling/
+outputs/experiments/paper/<YYYYMMDD_HHMMSS>/table4_downsampling/
 ```
 
 ## 一次性运行表 1-3
@@ -165,8 +165,25 @@ python scripts/train.py --configs configs/experiments/paper/**/*.yaml
 每个实验会输出到：
 
 ```text
-outputs/experiments/paper/<table_name>/<experiment_name>/
+outputs/experiments/paper/<YYYYMMDD_HHMMSS>/<table_name>/<experiment_name>/
 ```
+
+如果配置中设置：
+
+```yaml
+experiment:
+  run_name: auto
+```
+
+则每次训练会输出到时间戳子目录，避免覆盖上一轮结果：
+
+```text
+outputs/experiments/paper/<YYYYMMDD_HHMMSS>/<table_name>/<experiment_name>/
+```
+
+同一次 `python scripts/train.py --configs ...` 命令启动的多个 paper 配置会共用同一个时间戳目录。
+
+默认 `output.overwrite: false`，目标目录已有文件时训练会停止。只有明确设置 `output.overwrite: true` 时才允许复用已有目录。
 
 常见文件包括：
 
@@ -187,6 +204,20 @@ plots/gate_weights.png    仅 gated dual-stream 模型生成
 mae
 mse
 ```
+
+训练完成后，可以把某一轮时间戳目录汇总为一个 Markdown 表格文件：
+
+```powershell
+python scripts/summarize_paper_results.py --run-dir outputs/experiments/paper/<YYYYMMDD_HHMMSS>
+```
+
+脚本只会在该目录下生成：
+
+```text
+paper_tables.md
+```
+
+`paper_tables.md` 包含表 1 至表 4，并自动从各实验的 `summary.json` 填入 `MAE`、`MSE`。
 
 ## 运行前检查清单
 
@@ -217,7 +248,7 @@ mse
 如果测试集为空：
 
 ```text
-检查 raw 文件名或 canonical CSV 的 sequence_id 是否包含 2000N。
+检查 raw 文件名或 canonical CSV 的 sequence_id 是否为 2000N_25degC_0.5C。
 ```
 
 如果 train/val/test 划分不符合预期：

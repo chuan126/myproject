@@ -1,0 +1,6 @@
+extends:
+  - ../../paper/table1_baselines/m2_informer_uitf.yaml
+  - ../_base_single_stream_tune.yml
+
+experiment:
+  name: paper_tune/table1_baselines/m2_informer_uitf
